@@ -1901,6 +1901,7 @@ export function issueService(db: Db) {
           status: issues.status,
           assigneeAgentId: issues.assigneeAgentId,
           checkoutRunId: issues.checkoutRunId,
+          executionRunId: issues.executionRunId,
         })
         .from(issues)
         .where(eq(issues.id, id))
@@ -1935,6 +1936,41 @@ export function issueService(db: Db) {
             ...adopted,
             adoptedFromRunId: current.checkoutRunId,
           };
+        }
+      }
+
+      // Another agent's completed run can leave execution_run_id set while checkout_run_id is null
+      // (e.g. comment/interrupt paths), which blocks the assignee from PATCH/checkout. Clear stale locks.
+      if (
+        actorRunId &&
+        current.status === "in_progress" &&
+        current.assigneeAgentId === actorAgentId &&
+        current.checkoutRunId == null &&
+        current.executionRunId &&
+        current.executionRunId !== actorRunId
+      ) {
+        const staleExecution = await isTerminalOrMissingHeartbeatRun(current.executionRunId);
+        if (staleExecution) {
+          const cleared = await db
+            .update(issues)
+            .set({
+              executionRunId: null,
+              executionAgentNameKey: null,
+              executionLockedAt: null,
+              updatedAt: new Date(),
+            })
+            .where(and(eq(issues.id, id), eq(issues.executionRunId, current.executionRunId)))
+            .returning({
+              id: issues.id,
+              status: issues.status,
+              assigneeAgentId: issues.assigneeAgentId,
+              checkoutRunId: issues.checkoutRunId,
+              executionRunId: issues.executionRunId,
+            })
+            .then((rows) => rows[0] ?? null);
+          if (cleared) {
+            return { ...cleared, adoptedFromRunId: null as string | null };
+          }
         }
       }
 
