@@ -1917,6 +1917,18 @@ export function issueService(db: Db) {
         return { ...current, adoptedFromRunId: null as string | null };
       }
 
+      // Assignee change clears checkout_run_id but can leave execution_run_id on the same run;
+      // sameRunLock(null, actorRunId) is false, so without this branch the assignee cannot PATCH/comment/release.
+      if (
+        actorRunId &&
+        current.status === "in_progress" &&
+        current.assigneeAgentId === actorAgentId &&
+        current.checkoutRunId == null &&
+        current.executionRunId === actorRunId
+      ) {
+        return { ...current, adoptedFromRunId: null as string | null };
+      }
+
       if (
         actorRunId &&
         current.status === "in_progress" &&
