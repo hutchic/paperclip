@@ -895,6 +895,105 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     ).toBe(true);
   });
 
+  it("does not reclaim workspace_validation when the issue is already cancelled", async () => {
+    const { companyId, coderId, sourceIssue } = await seedCompany();
+    const enqueueWakeup = vi.fn(async () => null);
+    const recovery = recoveryService(db, { enqueueWakeup });
+    const priorRunId = randomUUID();
+    const failedRunId = randomUUID();
+    const priorFinishedAt = new Date("2026-10-19T21:30:07.465Z");
+    const failedStartedAt = new Date("2026-10-19T21:30:08.040Z");
+
+    await db
+      .update(issues)
+      .set({ status: "cancelled" })
+      .where(eq(issues.id, sourceIssue.id));
+    const [cancelledIssue] = await db.select().from(issues).where(eq(issues.id, sourceIssue.id));
+
+    await db.insert(heartbeatRuns).values({
+      id: priorRunId,
+      companyId,
+      agentId: coderId,
+      invocationSource: "assignment",
+      status: "succeeded",
+      startedAt: new Date("2026-10-19T21:20:00.000Z"),
+      finishedAt: priorFinishedAt,
+      livenessReason: "Issue is done",
+      contextSnapshot: { issueId: sourceIssue.id, taskId: sourceIssue.id },
+    });
+    await db.insert(heartbeatRuns).values({
+      id: failedRunId,
+      companyId,
+      agentId: coderId,
+      invocationSource: "timer",
+      status: "failed",
+      errorCode: "workspace_validation_failed",
+      error: "git_worktree_not_reusable: not_registered",
+      startedAt: failedStartedAt,
+      finishedAt: new Date("2026-10-19T21:30:08.500Z"),
+      contextSnapshot: {
+        issueId: sourceIssue.id,
+        taskId: sourceIssue.id,
+        wakeReason: "issue_commented",
+      },
+      resultJson: {
+        workspaceValidation: {
+          reason: "git_worktree_not_reusable",
+          fingerprint: "git_worktree_not_reusable:not_registered",
+        },
+      },
+    });
+
+    const updated = await recovery.escalateStrandedAssignedIssue({
+      issue: cancelledIssue!,
+      previousStatus: "done",
+      latestRun: {
+        id: failedRunId,
+        agentId: coderId,
+        status: "failed" as const,
+        error: "git_worktree_not_reusable: not_registered",
+        errorCode: "workspace_validation_failed",
+        contextSnapshot: {
+          issueId: sourceIssue.id,
+          taskId: sourceIssue.id,
+          wakeReason: "issue_commented",
+        },
+        livenessState: "failed" as const,
+        startedAt: failedStartedAt,
+        createdAt: failedStartedAt,
+        resultJson: {
+          workspaceValidation: {
+            reason: "git_worktree_not_reusable",
+            fingerprint: "git_worktree_not_reusable:not_registered",
+          },
+        },
+      },
+      recoveryCause: "workspace_validation_failed",
+    });
+
+    expect(updated).toBeNull();
+    const [issueRow] = await db.select().from(issues).where(eq(issues.id, sourceIssue.id));
+    expect(issueRow?.status).toBe("cancelled");
+    expect(enqueueWakeup).not.toHaveBeenCalled();
+
+    const reclaimActivities = await db
+      .select()
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.companyId, companyId),
+          eq(activityLog.entityId, sourceIssue.id),
+          eq(activityLog.action, "issue.updated"),
+        ),
+      );
+    expect(
+      reclaimActivities.some((row) => {
+        const details = row.details as Record<string, unknown> | null;
+        return details?.source === "recovery.reclaim_post_terminal_workspace_validation";
+      }),
+    ).toBe(false);
+  });
+
   it("does not reclaim workspace_validation when the prior succeeded run never finished the issue", async () => {
     const { companyId, coderId, sourceIssue } = await seedCompany();
     const recovery = recoveryService(db, { enqueueWakeup: vi.fn(async () => null) });

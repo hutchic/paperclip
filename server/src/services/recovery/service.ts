@@ -4248,9 +4248,16 @@ export function recoveryService(
         return null;
       }
 
+      // Cancelled is terminal and must not be overwritten by post-done reclaim
+      // (user/board cancel between wake-release and this reread stays cancelled).
+      if (current.status === "cancelled") {
+        return null;
+      }
+
       // Post-terminal workspace_validation reclaim runs even when the leaf is
       // already done: dismiss board-orphan park / restore done as false_positive.
-      // Must happen before the terminal short-circuit below.
+      // Must happen before the remaining terminal short-circuit below so `done`
+      // can still reclaim; cancelled already returned above.
       const recoveryCause = resolveStrandedRecoveryCause(
         input.latestRun,
         input.recoveryCause,
@@ -4270,7 +4277,7 @@ export function recoveryService(
         }
       }
 
-      if (["done", "cancelled"].includes(current.status)) {
+      if (current.status === "done") {
         return null;
       }
 
