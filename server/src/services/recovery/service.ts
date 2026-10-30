@@ -4156,17 +4156,29 @@ export function recoveryService(
   }
 
   async function reclaimPostTerminalWorkspaceValidationRace(input: {
-    issue: typeof issues.$inferSelect;
+    issue: RecoveryIssue;
     previousStatus: StrandedPreviousStatus;
     latestRun: LatestIssueRun;
     prior: { id: string; finishedAt: Date; livenessReason: string | null };
+    tx: DbTransaction;
+    publications: ActivityPublication[];
+    postCommitActions: IssuePostCommitAction[];
   }) {
     const resolutionNote =
       `Prior delivery run ${input.prior.id} completed` +
       (input.prior.livenessReason ? ` with livenessReason=${input.prior.livenessReason}` : "") +
       ` at ${input.prior.finishedAt.toISOString()}; stale post-done workspace_validation race auto-dismissed.`;
 
-    const updated = await issuesSvc.update(input.issue.id, { status: "done" });
+    // Must use the held FOR UPDATE connection — an outer-pool update deadlocks
+    // against escalateStrandedAssignedIssue's issue row lock.
+    const transactionIssuesSvc = issueService(input.tx as unknown as Db);
+    const updated = await transactionIssuesSvc.update(
+      input.issue.id,
+      { status: "done" },
+      input.tx,
+      input.publications,
+      input.postCommitActions,
+    );
     if (!updated) return null;
 
     await recoveryActionsSvc.resolveActiveForIssue({
@@ -4177,9 +4189,9 @@ export function recoveryService(
       status: "resolved",
       outcome: "false_positive",
       resolutionNote,
-    });
+    }, input.tx);
 
-    await logActivity(db, {
+    await logActivity(input.tx as unknown as Db, {
       companyId: input.issue.companyId,
       actorType: "system",
       actorId: "system",
@@ -4199,7 +4211,7 @@ export function recoveryService(
         resolutionNote,
         outcome: "false_positive",
       },
-    });
+    }, input.publications);
 
     return updated;
   }
@@ -4225,7 +4237,6 @@ export function recoveryService(
       )).for("update").limit(1).then((rows) => rows[0] ?? null);
       if (!current || current.hiddenAt
         || current.status !== input.issue.status
-        || ["done", "cancelled"].includes(current.status)
         || current.statusVersion !== input.issue.statusVersion
         || current.lastStatusDecisionId !== input.issue.lastStatusDecisionId
         || current.assigneeAgentId !== input.issue.assigneeAgentId
@@ -4234,6 +4245,32 @@ export function recoveryService(
         || current.checkoutRunId !== input.issue.checkoutRunId
         || current.executionAgentNameKey !== input.issue.executionAgentNameKey
         || current.updatedAt.getTime() !== input.issue.updatedAt.getTime()) {
+        return null;
+      }
+
+      // Post-terminal workspace_validation reclaim runs even when the leaf is
+      // already done: dismiss board-orphan park / restore done as false_positive.
+      // Must happen before the terminal short-circuit below.
+      const recoveryCause = resolveStrandedRecoveryCause(
+        input.latestRun,
+        input.recoveryCause,
+      );
+      if (recoveryCause === "workspace_validation_failed") {
+        const prior = await findPriorSuccessfulDoneEvidence(current, input.latestRun);
+        if (prior) {
+          return reclaimPostTerminalWorkspaceValidationRace({
+            issue: current,
+            previousStatus: input.previousStatus,
+            latestRun: input.latestRun,
+            prior,
+            tx,
+            publications,
+            postCommitActions,
+          });
+        }
+      }
+
+      if (["done", "cancelled"].includes(current.status)) {
         return null;
       }
 
@@ -4278,17 +4315,6 @@ export function recoveryService(
       input.latestRun,
       input.recoveryCause,
     );
-    if (recoveryCause === "workspace_validation_failed") {
-      const prior = await findPriorSuccessfulDoneEvidence(input.issue, input.latestRun);
-      if (prior) {
-        return reclaimPostTerminalWorkspaceValidationRace({
-          issue: input.issue,
-          previousStatus: input.previousStatus,
-          latestRun: input.latestRun,
-          prior,
-        });
-      }
-    }
     const recoveryAction = await ensureSourceScopedStrandedRecoveryAction({
       issue: input.issue,
       previousStatus: input.previousStatus,
