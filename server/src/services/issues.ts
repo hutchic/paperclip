@@ -43,6 +43,7 @@ import { Buffer } from "node:buffer";
 import { isDeepStrictEqual } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { isExplicitContinuationRetryClaim } from "./explicit-continuation-retry-claim.js";
+import { bindHeartbeatRunOnCheckout } from "./bind-heartbeat-run-on-checkout.js";
 import { markdownToPlainText, parseMarkdown } from "chat";
 import { listExternalReviewWaits } from "./native-runtime/external-review-wait.js";
 import {
@@ -12079,6 +12080,21 @@ export function issueService(db: Db) {
             eq(issues.executionRunId, checkoutRunId),
           )
         : isNull(issues.executionRunId);
+      const finishCheckout = async <T extends { id: string }>(row: T): Promise<T> => {
+        // Unassigned / deferred-wake runs start with null issueId on the heartbeat
+        // row. Bind write attribution to the checked-out issue under the same run
+        // id so PATCH/comment are same-issue (not 403 / cross-issue cap spend).
+        if (checkoutRunId) {
+          await bindHeartbeatRunOnCheckout(db, {
+            companyId: issueCompany.companyId,
+            agentId,
+            runId: checkoutRunId,
+            issueId: id,
+          });
+        }
+        return row;
+      };
+
       const updated = await db.transaction(async tx => {
         await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);
         await notifyDeliveryWork(tx, DELIVERY_QUEUES.agentTimers);
@@ -12107,7 +12123,7 @@ export function issueService(db: Db) {
 
       if (updated) {
         const [enriched] = await withIssueLabels(db, [updated]);
-        return enriched;
+        return finishCheckout(enriched);
       }
 
       const current = await db
@@ -12153,7 +12169,7 @@ export function issueService(db: Db) {
           )
           .returning()
           .then((rows) => rows[0] ?? null);
-        if (adopted) return adopted;
+        if (adopted) return finishCheckout(adopted);
       }
 
       if (
@@ -12177,7 +12193,7 @@ export function issueService(db: Db) {
             .then((rows) => rows[0] ?? null);
           if (!row) throw notFound("Issue not found");
           const [enriched] = await withIssueLabels(db, [row]);
-          return enriched;
+          return finishCheckout(enriched);
         }
       }
 
@@ -12230,7 +12246,7 @@ export function issueService(db: Db) {
           });
           if (adopted) {
             const [enriched] = await withIssueLabels(db, [adopted]);
-            return enriched;
+            return finishCheckout(enriched);
           }
         }
       }
@@ -12248,7 +12264,7 @@ export function issueService(db: Db) {
           .then((rows) => rows[0] ?? null);
         if (!row) throw notFound("Issue not found");
         const [enriched] = await withIssueLabels(db, [row]);
-        return enriched;
+        return finishCheckout(enriched);
       }
 
       throw conflict("Issue checkout conflict", {
