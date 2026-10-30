@@ -294,9 +294,9 @@ A known execution hold is a waiting condition, not a new execution attempt. Ever
 When the board reconciles one legacy no-replay hold for a source run, sibling
 holds that share the same company, task, kind, cause, fingerprint, and run id
 share that verified decision and lose their projecting `automaticRecovery.replay`
-block (one continuation owner). Settled no-replay holds on a task whose status
-already matches the requested disposition (especially `done` / `cancelled`) clear
-in place without a reopen→`todo` status flip.
+block (one continuation owner). Settled no-replay holds on a `done` or `cancelled`
+task clear in place when the requested disposition matches the current status,
+without a reopen→`todo` status flip.
 
 A queued legacy run denied by that final gate is still a wait. Its matching
 dispatch-gate receipt, task identity, and absence of runtime selection, execution
