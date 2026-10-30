@@ -33,6 +33,10 @@ export type BindHeartbeatRunOnCheckoutResult =
  * Only binds unscoped runs, or fills missing columns/snapshot when the run is
  * already attributed to the same issue. Never steals a binding from a different
  * issue — that would weaken the cross-issue influence cap.
+ *
+ * Typed `issueId` / `nativeIssueId` columns are intentional: GET /heartbeat-runs
+ * and write attribution both read them. Snapshot-only binds leave those columns
+ * null and still look unbound to operators and some install paths.
  */
 export async function bindHeartbeatRunOnCheckout(
   db: Db,
