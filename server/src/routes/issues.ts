@@ -9935,10 +9935,15 @@ export function issueRoutes(
                   { code: "settled_no_replay_active_conflict" },
                 );
               }
-              // Matching current status (especially done/cancelled) clears the
-              // hold in place — no reopen→todo, no status flip, no 500 on the
-              // terminal reopen path (DEF-932 / DEF-747).
-              if (sourceIssueStatus === lockedIssue.status) {
+              // Terminal status match clears the hold in place — no reopen→todo,
+              // no status flip, no 500 on the terminal reopen path (DEF-932 /
+              // DEF-747). Non-terminal matching status must not clear: a
+              // repair-only request shape must not authorize ordinary
+              // reconciliation of a no-replay hold.
+              if (
+                sourceIssueStatus === lockedIssue.status &&
+                ["done", "cancelled"].includes(lockedIssue.status)
+              ) {
                 if (settled.evidence.executionReconciliation) {
                   return {
                     issue: lockedIssue,
