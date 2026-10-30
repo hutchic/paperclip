@@ -12090,9 +12090,11 @@ export function issueService(db: Db) {
         // Unassigned / deferred-wake runs start with null issueId on the heartbeat
         // row. Bind write attribution to the checked-out issue under the same run
         // id so PATCH/comment are same-issue (not 403 / cross-issue cap spend).
-        // Must run inside the claim transaction so a bind failure rolls back the claim.
+        // Bind inside the claim TX so a successful stamp commits with the claim.
+        // Soft-skip when the actor run is missing or owned by another agent
+        // (reassignment / Fix B stale-checkout heal) — do not fail checkout.
         if (!checkoutRunId) return;
-        const bindResult = await bindHeartbeatRunOnCheckout(
+        await bindHeartbeatRunOnCheckout(
           tx,
           {
             companyId: issueCompany.companyId,
@@ -12102,12 +12104,6 @@ export function issueService(db: Db) {
           },
           { withinTransaction: true },
         );
-        if (bindResult.reason === "run_missing") {
-          throw unprocessable("Checkout run not found for bind", {
-            runId: checkoutRunId,
-            issueId: id,
-          });
-        }
       };
 
       const finishCheckout = async <T extends { id: string }>(row: T): Promise<T> => {
