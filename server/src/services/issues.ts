@@ -12080,16 +12080,36 @@ export function issueService(db: Db) {
             eq(issues.executionRunId, checkoutRunId),
           )
         : isNull(issues.executionRunId);
-      const finishCheckout = async <T extends { id: string }>(row: T): Promise<T> => {
+      const bindCheckoutRun = async (tx: typeof db) => {
         // Unassigned / deferred-wake runs start with null issueId on the heartbeat
         // row. Bind write attribution to the checked-out issue under the same run
         // id so PATCH/comment are same-issue (not 403 / cross-issue cap spend).
-        if (checkoutRunId) {
-          await bindHeartbeatRunOnCheckout(db, {
+        // Must run inside the claim transaction so a bind failure rolls back the claim.
+        if (!checkoutRunId) return;
+        const bindResult = await bindHeartbeatRunOnCheckout(
+          tx,
+          {
             companyId: issueCompany.companyId,
             agentId,
             runId: checkoutRunId,
             issueId: id,
+          },
+          { withinTransaction: true },
+        );
+        if (bindResult.reason === "run_missing") {
+          throw unprocessable("Checkout run not found for bind", {
+            runId: checkoutRunId,
+            issueId: id,
+          });
+        }
+      };
+
+      const finishCheckout = async <T extends { id: string }>(row: T): Promise<T> => {
+        // Claim already committed on this path; bind in its own TX (best-effort
+        // same-issue fill for re-entrant / already-owned checkouts).
+        if (checkoutRunId) {
+          await db.transaction(async (tx) => {
+            await bindCheckoutRun(tx);
           });
         }
         return row;
@@ -12098,7 +12118,7 @@ export function issueService(db: Db) {
       const updated = await db.transaction(async tx => {
         await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);
         await notifyDeliveryWork(tx, DELIVERY_QUEUES.agentTimers);
-        return tx
+        const row = await tx
           .update(issues)
           .set({
             assigneeAgentId: agentId,
@@ -12119,11 +12139,13 @@ export function issueService(db: Db) {
           )
           .returning()
           .then((rows) => rows[0] ?? null);
+        if (row) await bindCheckoutRun(tx);
+        return row;
       });
 
       if (updated) {
         const [enriched] = await withIssueLabels(db, [updated]);
-        return finishCheckout(enriched);
+        return enriched;
       }
 
       const current = await db
@@ -12148,28 +12170,32 @@ export function issueService(db: Db) {
           current.executionRunId === checkoutRunId) &&
         checkoutRunId
       ) {
-        const adopted = await db
-          .update(issues)
-          .set({
-            checkoutRunId,
-            executionRunId: checkoutRunId,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(issues.id, id),
-              eq(issues.status, "in_progress"),
-              eq(issues.assigneeAgentId, agentId),
-              isNull(issues.checkoutRunId),
-              or(
-                isNull(issues.executionRunId),
-                eq(issues.executionRunId, checkoutRunId),
+        const adopted = await db.transaction(async (tx) => {
+          const row = await tx
+            .update(issues)
+            .set({
+              checkoutRunId,
+              executionRunId: checkoutRunId,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(issues.id, id),
+                eq(issues.status, "in_progress"),
+                eq(issues.assigneeAgentId, agentId),
+                isNull(issues.checkoutRunId),
+                or(
+                  isNull(issues.executionRunId),
+                  eq(issues.executionRunId, checkoutRunId),
+                ),
               ),
-            ),
-          )
-          .returning()
-          .then((rows) => rows[0] ?? null);
-        if (adopted) return finishCheckout(adopted);
+            )
+            .returning()
+            .then((rows) => rows[0] ?? null);
+          if (row) await bindCheckoutRun(tx);
+          return row;
+        });
+        if (adopted) return adopted;
       }
 
       if (
@@ -12227,7 +12253,7 @@ export function issueService(db: Db) {
           const adopted = await db.transaction(async tx => {
             await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);
             await notifyDeliveryWork(tx, DELIVERY_QUEUES.agentTimers);
-            return tx
+            const row = await tx
               .update(issues)
               .set(adoptionSet)
               .where(
@@ -12243,10 +12269,12 @@ export function issueService(db: Db) {
               )
               .returning()
               .then((rows) => rows[0] ?? null);
+            if (row) await bindCheckoutRun(tx);
+            return row;
           });
           if (adopted) {
             const [enriched] = await withIssueLabels(db, [adopted]);
-            return finishCheckout(enriched);
+            return enriched;
           }
         }
       }
