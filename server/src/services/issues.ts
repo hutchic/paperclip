@@ -7775,6 +7775,12 @@ export function issueService(db: Db) {
     actorRunId: string;
   }) {
     return db.transaction(async (tx) => {
+      // Lock issue before run — same order as checkout claim+bind and
+      // adoptStaleCheckoutRun / clearExecutionRunIfTerminal, so a concurrent
+      // checkout (issue → run) cannot deadlock with this write-path adopt.
+      await tx.execute(
+        sql`select ${issues.id} from ${issues} where ${issues.id} = ${input.issueId} for update`,
+      );
       await tx.execute(
         sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.actorRunId} for update`,
       );
@@ -12080,7 +12086,7 @@ export function issueService(db: Db) {
             eq(issues.executionRunId, checkoutRunId),
           )
         : isNull(issues.executionRunId);
-      const bindCheckoutRun = async (tx: typeof db) => {
+      const bindCheckoutRun = async (tx: DbTransaction) => {
         // Unassigned / deferred-wake runs start with null issueId on the heartbeat
         // row. Bind write attribution to the checked-out issue under the same run
         // id so PATCH/comment are same-issue (not 403 / cross-issue cap spend).

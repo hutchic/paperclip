@@ -2,6 +2,11 @@ import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { heartbeatRuns } from "@paperclipai/db";
 
+/** Drizzle transaction client — no root `$client`; used by claim/bind TX paths. */
+type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+/** Root connection or an open transaction (select/update/for-update compatible). */
+type DbOrTransaction = Db | DbTransaction;
+
 function readSnapshotIssueId(contextSnapshot: unknown): string | null {
   if (!contextSnapshot || typeof contextSnapshot !== "object" || Array.isArray(contextSnapshot)) {
     return null;
@@ -55,7 +60,7 @@ export type BindHeartbeatRunOnCheckoutOptions = {
  * typed column that still points at another issue.
  */
 async function bindHeartbeatRunOnCheckoutInTx(
-  tx: Db,
+  tx: DbOrTransaction,
   input: BindHeartbeatRunOnCheckoutInput,
 ): Promise<BindHeartbeatRunOnCheckoutResult> {
   const run = await tx
@@ -141,12 +146,13 @@ async function bindHeartbeatRunOnCheckoutInTx(
 }
 
 export async function bindHeartbeatRunOnCheckout(
-  db: Db,
+  db: DbOrTransaction,
   input: BindHeartbeatRunOnCheckoutInput,
   options: BindHeartbeatRunOnCheckoutOptions = {},
 ): Promise<BindHeartbeatRunOnCheckoutResult> {
   if (options.withinTransaction) {
     return bindHeartbeatRunOnCheckoutInTx(db, input);
   }
-  return db.transaction((tx) => bindHeartbeatRunOnCheckoutInTx(tx, input));
+  // Nested TX only on the root connection — transaction clients have no `$client`.
+  return (db as Db).transaction((tx) => bindHeartbeatRunOnCheckoutInTx(tx, input));
 }
